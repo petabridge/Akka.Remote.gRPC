@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// Defines a payload.
+message Payload {
+  bytes message = 1;
+  int32 serializerId = 2;
+  bytes messageManifest = 3;
+}
+
+
+// Bi-directional streaming
+service AkkaRemote{
+  rpc MessageEndpoint (stream Payload) returns (stream Payload);
+}
