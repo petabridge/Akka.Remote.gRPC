@@ -1,10 +1,10 @@
 syntax = "proto3";
 
+option csharp_namespace = "Akka.Remote.Transport.gRPC";
+
 // Defines a payload.
 message Payload {
   bytes message = 1;
-  int32 serializerId = 2;
-  bytes messageManifest = 3;
 }
 
 
