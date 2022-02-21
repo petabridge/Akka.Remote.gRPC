@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Channels;
@@ -8,7 +10,6 @@ using Akka.Actor;
 using Akka.Configuration;
 using Akka.Event;
 using Akka.Remote.Transport;
-using Akka.Remote.Transport.gRPC;
 using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.AspNetCore.Builder;
@@ -44,113 +45,33 @@ namespace Akka.Remote.gRPC
     }
 
     /// <summary>
-    /// Reusable abstraction shared between gRPC client and server connections.
+    /// INTERNAL API
+    ///
+    /// Responsible for managing open connections and spawning new <see cref="GrpcHandler"/>s
+    /// for both inbound and outbound connections.
     /// </summary>
-    internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
+    internal sealed class GrpcConnectionManager
     {
-        private readonly IAsyncStreamReader<Payload> _requestStream;
-        private readonly IServerStreamWriter<Payload> _responseStream;
+        private readonly ConcurrentBag<GrpcHandler> _allConnections = new ConcurrentBag<GrpcHandler>();
 
-        // driven by the gRPC connection
-        private readonly CancellationToken _grpcCancellationToken;
+        private readonly Task<IAssociationEventListener> _listenerTask;
+        public GrpcTransport Transport { get; }
 
-        // managed by us
-        private readonly CancellationTokenSource _internalCancellationToken;
-
-        private IHandleEventListener _listener;
-        private readonly TaskCompletionSource<Done> _readHandlerSet;
-        private readonly TaskCompletionSource<Done> _shutdownTask;
-
-        public GrpcHandler(IAsyncStreamReader<Payload> requestStream, IServerStreamWriter<Payload> responseStream,
-            Address remoteAddress, Address localAddress, CancellationToken grpcCancellationToken)
-        {
-            _requestStream = requestStream;
-            _responseStream = responseStream;
-            _grpcCancellationToken = grpcCancellationToken;
-            RemoteAddress = remoteAddress;
-            LocalAddress = localAddress;
-            _internalCancellationToken = CancellationTokenSource.CreateLinkedTokenSource(grpcCancellationToken);
-            _readHandlerSet = new TaskCompletionSource<Done>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _shutdownTask = new TaskCompletionSource<Done>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _internalCancellationToken.Token.Register(() => _shutdownTask.TrySetResult(Done.Instance));
-        }
-
-        public void RegisterListener(IHandleEventListener listener)
-        {
-            _listener = listener;
-            _readHandlerSet.TrySetResult(Done.Instance);
-#pragma warning disable CS4014
-            DoRead();
-#pragma warning restore CS4014
-        }
-
-        public async Task<Done> CloseAsync()
-        {
-            _internalCancellationToken.Cancel();
-            return await _shutdownTask.Task.ConfigureAwait(false);
-        }
-
-        public bool Write(ByteString message)
-        {
-            if (!_internalCancellationToken.IsCancellationRequested)
-            {
-                // don't await
-                _responseStream.WriteAsync(new Payload() { Message = message });
-                return true;
-            }
-
-            return false;
-        }
-
-        public Task<Done> WhenTerminated => _shutdownTask.Task;
-
-        public Task<Done> WhenReadOpen => _readHandlerSet.Task;
+        public ActorSystem System => Transport.System;
         
-        public Address RemoteAddress { get; }
-        
-        public Address LocalAddress { get; }
 
-        private async Task DoRead()
+        public GrpcConnectionManager(Task<IAssociationEventListener> listenerTask, GrpcTransport transport)
         {
-            // need to wait for the read handler to be set first
-            await WhenReadOpen;
-            await foreach (var read in _requestStream.ReadAllAsync(_internalCancellationToken.Token))
-            {
-                _listener.Notify(new InboundPayload(read.Message));
-            }
+            _listenerTask = listenerTask;
+            Transport = transport;
         }
 
-        public void Dispose()
+        public ValueTask<GrpcHandler> StartHandlerAsync(
+            IAsyncStreamReader<Akka.Remote.Transport.gRPC.Payload> requestStream,
+            IServerStreamWriter<Akka.Remote.Transport.gRPC.Payload> responseStream,
+            CancellationToken grpcCancellationToken)
         {
-            _internalCancellationToken?.Cancel();
-            _internalCancellationToken?.Dispose();
-        }
-        
-        public bool Equals(GrpcHandler other)
-        {
-            if (ReferenceEquals(null, other)) return false;
-            if (ReferenceEquals(this, other)) return true;
-            return RemoteAddress.Equals(other.RemoteAddress) && LocalAddress.Equals(other.LocalAddress);
-        }
-
-        public override bool Equals(object obj)
-        {
-            return ReferenceEquals(this, obj) || obj is GrpcHandler other && Equals(other);
-        }
-
-        public override int GetHashCode()
-        {
-            return HashCode.Combine(RemoteAddress, LocalAddress);
-        }
-
-        public static bool operator ==(GrpcHandler left, GrpcHandler right)
-        {
-            return Equals(left, right);
-        }
-
-        public static bool operator !=(GrpcHandler left, GrpcHandler right)
-        {
-            return !Equals(left, right);
+            
         }
     }
 
@@ -166,16 +87,15 @@ namespace Akka.Remote.gRPC
         }
 
         private readonly TaskCompletionSource<IAssociationEventListener> _associationListenerPromise;
-        private readonly IWebHost _host;
-        
-        // all open connections
-        private readonly ConcurrentBag<GrpcHandler> _handlers = new ConcurrentBag<GrpcHandler>();
+        private WebApplication? _host;
 
         public ILoggingAdapter Log { get; }
 
         public ActorSystem System { get; }
 
         public GrpcTransportSettings Settings { get; }
+
+        public override string SchemeIdentifier => "grpc";
 
         public override async Task<(Address, TaskCompletionSource<IAssociationEventListener>)> Listen()
         {
@@ -214,8 +134,32 @@ namespace Akka.Remote.gRPC
                             options.MaxSendMessageSize = null;
                         });
 
+                    })
+                    .Configure(app =>
+                    {
+                        app.UseEndpoints(ep =>
+                        {
+                            ep.MapGrpcService<GrpcServerListener>();
+                        });
                     });
+
+                _host = builder.Build();
+                
+                // begin accepting incoming requests
+                await _host.StartAsync();
+
+                var address = MapGrpcConnectionToAddress(_host.Urls, SchemeIdentifier, System.Name,
+                    Settings.PublicPort ?? Settings.Port);
             }
+        }
+
+        internal static Address MapGrpcConnectionToAddress(ICollection<string> hostUrls, 
+            string schemeIdentifier, string systemName, int port, string publicHostname = null)
+        {
+            // TODO: probably need to do some parsing / filtering on hostUrls bindings here
+            return hostUrls == null
+                ? null
+                : new Address(schemeIdentifier, systemName, publicHostname ?? hostUrls.First(), port);
         }
 
         public override bool IsResponsibleFor(Address remote)
@@ -230,48 +174,8 @@ namespace Akka.Remote.gRPC
 
         public override async Task<bool> Shutdown()
         {
-            throw new NotImplementedException();
-        }
-    }
-
-    /// <summary>
-    /// Inbound
-    /// </summary>
-    internal sealed class GrpcServerListener : AkkaRemote.AkkaRemoteBase
-    {
-        public GrpcServerListener(Channel<ByteString> writeBytes, Channel<ByteString> readBytes)
-        {
-            _writeBytes = writeBytes;
-            _readBytes = readBytes;
-        }
-
-        /*
-         * New server handle will need to be created each time here...
-         */
-        public override async Task MessageEndpoint(IAsyncStreamReader<Payload> requestStream,
-            IServerStreamWriter<Payload> responseStream, ServerCallContext context)
-        {
-            //context.GetHttpContext().Connection.
-            async Task DoWrites()
-            {
-                await foreach (var write in _writeBytes.Reader.ReadAllAsync(context.CancellationToken))
-                {
-                    await responseStream.WriteAsync(new Payload() { Message = write });
-                }
-            }
-
-            async Task DoReads()
-            {
-                await foreach (var read in requestStream.ReadAllAsync(context.CancellationToken))
-                {
-                    await _readBytes.Writer.WriteAsync(read.Message, context.CancellationToken);
-                }
-            }
-
-            // let the writes run asynchronously
-            var writeTask = DoWrites();
-            var readTask = DoReads();
-            await Task.WhenAll(writeTask, readTask);
+            if (_host != null)
+                await _host.StopAsync();
         }
     }
 }
