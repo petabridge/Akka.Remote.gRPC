@@ -9,9 +9,11 @@ using Akka.Actor;
 using Akka.Configuration;
 using Akka.Event;
 using Akka.Remote.Transport;
+using Akka.Remote.Transport.gRPC;
 using Akka.Util;
 using Google.Protobuf;
 using Grpc.Core;
+using Grpc.Net.Client;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -65,9 +67,9 @@ namespace Akka.Remote.gRPC
             Transport = transport;
         }
 
-        public async ValueTask<GrpcHandler> StartHandlerAsync(
+        public async ValueTask<(GrpcHandler grpc, AssociationHandle handle)> StartHandlerAsync(
             IAsyncStreamReader<Akka.Remote.Transport.gRPC.Payload> requestStream,
-            IServerStreamWriter<Akka.Remote.Transport.gRPC.Payload> responseStream,
+            IAsyncStreamWriter<Akka.Remote.Transport.gRPC.Payload> responseStream,
             Address localAddress,
             Address remoteAddress,
             CancellationToken grpcCancellationToken)
@@ -91,7 +93,7 @@ namespace Akka.Remote.gRPC
 #pragma warning disable CS4014
             RegisterEventListener();
 #pragma warning restore CS4014
-            return handler;
+            return (handler, associationHandle);
         }
 
         public async Task TerminateAsync()
@@ -227,14 +229,52 @@ namespace Akka.Remote.gRPC
             return new Address(schemeIdentifier, systemName, publicHostname ?? hostUrl, port);
         }
 
+        internal static string MapAddressToGrpcEndpoint(Address address)
+        {
+            // todo: HTTPS support
+            if (address.Port == null) throw new ArgumentException($"address port must not be null: {address}");
+            return $"http://{address.Host}:{address.Port}";
+        }
+
         public override bool IsResponsibleFor(Address remote)
         {
-            throw new NotImplementedException();
+            return remote.Protocol.EndsWith(SchemeIdentifier);
         }
 
         public override async Task<AssociationHandle> Associate(Address remoteAddress)
         {
-            throw new NotImplementedException();
+            /*
+             * Establish outbound gRPC connection
+             */
+            var remoteChannel = GrpcChannel.ForAddress(MapAddressToGrpcEndpoint(remoteAddress));
+            var client = new AkkaRemote.AkkaRemoteClient(remoteChannel);
+            var options = new CallOptions() { };
+            var ep = client.MessageEndpoint(options);
+            var (grpc, associationHandle) = await _connectionManager.StartHandlerAsync(ep.ResponseStream, ep.RequestStream, LocalAddress, remoteAddress,
+                options.CancellationToken).ConfigureAwait(false);
+            
+            // dispose client asynchronously
+            async Task DisposeUponClose()
+            {
+                // this task will only terminate once the channel has been termianted
+                await grpc.WhenTerminated.ConfigureAwait(false);
+                try
+                {
+                    await remoteChannel.ShutdownAsync().ConfigureAwait(false);
+                    ep.Dispose();
+                }
+                catch
+                {
+                    // don't really care about errors here
+                }
+            }
+
+            // don't want to await
+#pragma warning disable CS4014
+            DisposeUponClose();
+#pragma warning restore CS4014
+
+            return associationHandle;
         }
 
         public override async Task<bool> Shutdown()

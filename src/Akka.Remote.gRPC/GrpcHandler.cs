@@ -16,7 +16,7 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
 {
     private readonly GrpcConnectionManager _connectionManager;
     private readonly IAsyncStreamReader<Payload> _requestStream;
-    private readonly IServerStreamWriter<Payload> _responseStream;
+    private readonly IAsyncStreamWriter<Payload> _responseStream;
 
     // driven by the gRPC connection
     private readonly CancellationToken _grpcCancellationToken;
@@ -28,7 +28,7 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
     private readonly TaskCompletionSource<Done> _readHandlerSet;
     private readonly TaskCompletionSource<Done> _shutdownTask;
 
-    public GrpcHandler(GrpcConnectionManager connectionManager, IAsyncStreamReader<Payload> requestStream, IServerStreamWriter<Payload> responseStream,
+    public GrpcHandler(GrpcConnectionManager connectionManager, IAsyncStreamReader<Payload> requestStream, IAsyncStreamWriter<Payload> responseStream,
         Address localAddress, Address remoteAddress, CancellationToken grpcCancellationToken)
     {
         _connectionManager = connectionManager;
