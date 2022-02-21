@@ -14,6 +14,7 @@ namespace Akka.Remote.gRPC;
 /// </summary>
 internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
 {
+    private readonly GrpcConnectionManager _connectionManager;
     private readonly IAsyncStreamReader<Payload> _requestStream;
     private readonly IServerStreamWriter<Payload> _responseStream;
 
@@ -27,9 +28,11 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
     private readonly TaskCompletionSource<Done> _readHandlerSet;
     private readonly TaskCompletionSource<Done> _shutdownTask;
 
-    public GrpcHandler(IAsyncStreamReader<Payload> requestStream, IServerStreamWriter<Payload> responseStream,
-        Address remoteAddress, Address localAddress, CancellationToken grpcCancellationToken)
+    public GrpcHandler(GrpcConnectionManager connectionManager, IAsyncStreamReader<Payload> requestStream, IServerStreamWriter<Payload> responseStream,
+        Address localAddress, Address remoteAddress, CancellationToken grpcCancellationToken)
     {
+        _connectionManager = connectionManager;
+        _connectionManager.ConnectionGroup.TryAdd(this);
         _requestStream = requestStream;
         _responseStream = responseStream;
         _grpcCancellationToken = grpcCancellationToken;
@@ -38,7 +41,11 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         _internalCancellationToken = CancellationTokenSource.CreateLinkedTokenSource(grpcCancellationToken);
         _readHandlerSet = new TaskCompletionSource<Done>(TaskCreationOptions.RunContinuationsAsynchronously);
         _shutdownTask = new TaskCompletionSource<Done>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _internalCancellationToken.Token.Register(() => _shutdownTask.TrySetResult(Done.Instance));
+        _internalCancellationToken.Token.Register(() =>
+        {
+            _connectionManager.ConnectionGroup.TryRemove(this);
+            _shutdownTask.TrySetResult(Done.Instance);
+        });
     }
 
     public void RegisterListener(IHandleEventListener listener)

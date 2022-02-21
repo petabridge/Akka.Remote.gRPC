@@ -4,17 +4,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using Akka.Actor;
 using Akka.Configuration;
 using Akka.Event;
 using Akka.Remote.Transport;
+using Akka.Util;
 using Google.Protobuf;
 using Grpc.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -52,7 +51,7 @@ namespace Akka.Remote.gRPC
     /// </summary>
     internal sealed class GrpcConnectionManager
     {
-        private readonly ConcurrentBag<GrpcHandler> _allConnections = new ConcurrentBag<GrpcHandler>();
+        public ConcurrentSet<GrpcHandler> ConnectionGroup { get; } = new ConcurrentSet<GrpcHandler>();
 
         private readonly Task<IAssociationEventListener> _listenerTask;
         public GrpcTransport Transport { get; }
@@ -66,17 +65,60 @@ namespace Akka.Remote.gRPC
             Transport = transport;
         }
 
-        public ValueTask<GrpcHandler> StartHandlerAsync(
+        public async ValueTask<GrpcHandler> StartHandlerAsync(
             IAsyncStreamReader<Akka.Remote.Transport.gRPC.Payload> requestStream,
             IServerStreamWriter<Akka.Remote.Transport.gRPC.Payload> responseStream,
+            Address localAddress,
+            Address remoteAddress,
             CancellationToken grpcCancellationToken)
         {
-            
+            var associationEventListener = await _listenerTask.ConfigureAwait(false);
+
+            var handler = new GrpcHandler(this, requestStream, responseStream, localAddress, remoteAddress,
+                grpcCancellationToken);
+    
+            var associationHandle = new GrpcAssociationHandle(localAddress, remoteAddress, handler);
+            associationEventListener.Notify(new InboundAssociation(associationHandle));
+
+            // prepare the event listener
+            async Task RegisterEventListener()
+            {
+                var listener = await associationHandle.ReadHandlerSource.Task.ConfigureAwait(false);
+                handler.RegisterListener(listener);
+            }
+
+            // don't want to await here
+#pragma warning disable CS4014
+            RegisterEventListener();
+#pragma warning restore CS4014
+            return handler;
+        }
+
+        public async Task TerminateAsync()
+        {
+            try
+            {
+                var tasks = new List<Task>();
+                // we take a snapshot of the list here to avoid "collection modified" errors
+                foreach (var channel in ConnectionGroup.ToList())
+                {
+                    tasks.Add(channel.CloseAsync());
+                }
+
+                var all = Task.WhenAll(tasks);
+                await all.ConfigureAwait(false);
+            }
+            finally
+            {
+                ConnectionGroup.Clear();
+            }
         }
     }
 
     public sealed class GrpcTransport : Akka.Remote.Transport.Transport
     {
+        private readonly GrpcConnectionManager _connectionManager;
+        
         public GrpcTransport(ActorSystem system, Config config)
         {
             System = system;
@@ -84,6 +126,7 @@ namespace Akka.Remote.gRPC
             Settings = GrpcTransportSettings.Create(config);
             Log = Logging.GetLogger(System, GetType());
             _associationListenerPromise = new TaskCompletionSource<IAssociationEventListener>();
+            _connectionManager = new GrpcConnectionManager(_associationListenerPromise.Task, this);
         }
 
         private readonly TaskCompletionSource<IAssociationEventListener> _associationListenerPromise;
@@ -91,11 +134,11 @@ namespace Akka.Remote.gRPC
 
         public ILoggingAdapter Log { get; }
 
-        public ActorSystem System { get; }
-
         public GrpcTransportSettings Settings { get; }
 
         public override string SchemeIdentifier => "grpc";
+        
+        public Address LocalAddress { get; private set; }
 
         public override async Task<(Address, TaskCompletionSource<IAssociationEventListener>)> Listen()
         {
@@ -125,6 +168,8 @@ namespace Akka.Remote.gRPC
                     })
                     .ConfigureServices(services =>
                     {
+                        // add a single connection manager
+                        services.AddSingleton<GrpcConnectionManager>(_connectionManager);
                         services.AddGrpc(options =>
                         {
                             options.IgnoreUnknownServices = true;
@@ -148,8 +193,23 @@ namespace Akka.Remote.gRPC
                 // begin accepting incoming requests
                 await _host.StartAsync();
 
-                var address = MapGrpcConnectionToAddress(_host.Urls, SchemeIdentifier, System.Name,
+                LocalAddress = MapGrpcConnectionToAddress(_host.Urls, SchemeIdentifier, System.Name,
                     Settings.PublicPort ?? Settings.Port);
+
+                return (LocalAddress, _associationListenerPromise);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to bind to {0}; shutting down gRPC transport.", listenAddress);
+                try
+                {
+                    await Shutdown().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // ignore errors occurring during shutdown
+                }
+                throw;
             }
         }
 
@@ -157,9 +217,14 @@ namespace Akka.Remote.gRPC
             string schemeIdentifier, string systemName, int port, string publicHostname = null)
         {
             // TODO: probably need to do some parsing / filtering on hostUrls bindings here
-            return hostUrls == null
-                ? null
-                : new Address(schemeIdentifier, systemName, publicHostname ?? hostUrls.First(), port);
+            return MapGrpcConnectionToAddress(hostUrls.First(), schemeIdentifier, systemName, port, publicHostname);
+        }
+        
+        internal static Address MapGrpcConnectionToAddress(string hostUrl, 
+            string schemeIdentifier, string systemName, int port, string publicHostname = null)
+        {
+            // TODO: probably need to do some parsing / filtering on hostUrls bindings here
+            return new Address(schemeIdentifier, systemName, publicHostname ?? hostUrl, port);
         }
 
         public override bool IsResponsibleFor(Address remote)
@@ -174,8 +239,16 @@ namespace Akka.Remote.gRPC
 
         public override async Task<bool> Shutdown()
         {
+            // terminate all channels prior to shutting down the server
+            await _connectionManager.TerminateAsync().ConfigureAwait(false);
+            
+            // shut the server down
             if (_host != null)
-                await _host.StopAsync();
+            {
+                await _host.StopAsync().ConfigureAwait(false);
+            }
+
+            return true;
         }
     }
 }
