@@ -6,6 +6,11 @@ namespace Akka.Remote.gRPC;
 
 public sealed record GrpcTransportSettings
 {
+    /// <summary>
+    /// Default GRPC transport configuration
+    /// </summary>
+    public static readonly Config DefaultConfig = ConfigurationFactory.FromResource<GrpcTransportSettings>("Akka.Remote.gRPC.grpc.conf");
+    
     public static GrpcTransportSettings Create(Config config)
     {
         if (config.IsNullOrEmpty())

@@ -18,4 +18,8 @@
         <PackageReference Include="Grpc.AspNetCore" Version="2.42.0" />
         <PackageReference Include="Grpc.Net.ClientFactory" Version="2.42.0" />
     </ItemGroup>
+
+    <ItemGroup>
+      <EmbeddedResource Include="grpc.conf" />
+    </ItemGroup>
 </Project>

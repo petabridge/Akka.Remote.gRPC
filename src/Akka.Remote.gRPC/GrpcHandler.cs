@@ -43,8 +43,8 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         _shutdownTask = new TaskCompletionSource<Done>(TaskCreationOptions.RunContinuationsAsynchronously);
         _internalCancellationToken.Token.Register(() =>
         {
-            _connectionManager.ConnectionGroup.TryRemove(this);
             _shutdownTask.TrySetResult(Done.Instance);
+            _connectionManager.ConnectionGroup.TryRemove(this);
         });
     }
 
