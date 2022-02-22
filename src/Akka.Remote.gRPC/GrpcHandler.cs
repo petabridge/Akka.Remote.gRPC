@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Akka.Actor;
 using Akka.Remote.Transport;
@@ -15,6 +16,7 @@ namespace Akka.Remote.gRPC;
 internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
 {
     private readonly GrpcConnectionManager _connectionManager;
+    private readonly Channel<Payload> _pendingWrites;
     private readonly IAsyncStreamReader<Payload> _requestStream;
     private readonly IAsyncStreamWriter<Payload> _responseStream;
 
@@ -33,6 +35,7 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
     {
         _connectionManager = connectionManager;
         _connectionManager.ConnectionGroup.TryAdd(this);
+        _pendingWrites = Channel.CreateUnbounded<Payload>();
         _requestStream = requestStream;
         _responseStream = responseStream;
         _grpcCancellationToken = grpcCancellationToken;
@@ -46,6 +49,11 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
             _shutdownTask.TrySetResult(Done.Instance);
             _connectionManager.ConnectionGroup.TryRemove(this);
         });
+
+        // kick off writer task
+#pragma warning disable CS4014
+        DoWrite();
+#pragma warning restore CS4014
     }
 
     public void RegisterListener(IHandleEventListener listener)
@@ -60,32 +68,30 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
     public async Task<Done> CloseAsync()
     {
         _internalCancellationToken.Cancel();
+        _pendingWrites.Writer.Complete();
         return await _shutdownTask.Task.ConfigureAwait(false);
     }
 
-    public bool Write(ByteString message)
+    public async ValueTask<bool> Write(ByteString message)
     {
-        if (!_internalCancellationToken.IsCancellationRequested)
+        try
         {
-            // don't await
-            async Task DoWrite()
+            if (!_internalCancellationToken.IsCancellationRequested)
             {
-                try
+                if (await _pendingWrites.Writer.WaitToWriteAsync(_internalCancellationToken.Token)
+                        .ConfigureAwait(false))
                 {
-                    await _responseStream.WriteAsync(new Payload() { Message = message }).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    var e = ex;
+                    await _pendingWrites.Writer.WriteAsync(new Payload() { Message = message },
+                        _internalCancellationToken.Token).ConfigureAwait(false);
+                    return true;
                 }
             }
-
-#pragma warning disable CS4014
-            DoWrite();
-#pragma warning restore CS4014
-           
-            return true;
         }
+        catch (Exception ex)
+        {
+            var e = ex;
+        }
+        
 
         return false;
     }
@@ -105,6 +111,15 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         await foreach (var read in _requestStream.ReadAllAsync(_internalCancellationToken.Token).ConfigureAwait(false))
         {
             _listener.Notify(new InboundPayload(read.Message));
+        }
+    }
+
+    private async Task DoWrite()
+    {
+        await foreach (var write in _pendingWrites.Reader.ReadAllAsync(_internalCancellationToken.Token)
+                           .ConfigureAwait(false))
+        {
+            await _responseStream.WriteAsync(write).ConfigureAwait(false);
         }
     }
 

@@ -32,9 +32,13 @@ namespace Akka.Remote.gRPC
             _handler = handler;
         }
 
+        // TODO: need to make this async in Akka.NET
         public override bool Write(ByteString payload)
         {
-            return _handler.Write(payload);
+#pragma warning disable CS4014
+            _handler.Write(payload);
+#pragma warning restore CS4014
+            return true;
         }
 
         public override void Disassociate()

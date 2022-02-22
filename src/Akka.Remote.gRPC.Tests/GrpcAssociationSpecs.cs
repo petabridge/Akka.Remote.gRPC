@@ -33,7 +33,7 @@ public class GrpcAssociationSpecs : TestKit.Xunit2.TestKit
         var as1Address = Sys.As<ExtendedActorSystem>().Provider.DefaultAddress;
 
         var actorRef = await as2.ActorSelection(new RootActorPath(as1Address) / "user" / "target")
-            .Ask<string>("hit", TimeSpan.FromMinutes(10));
+            .Ask<string>("hit", TimeSpan.FromMinutes(1));
         actorRef.Should().Be("hit");
     }    
 }
