@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Akka.Actor;
@@ -141,6 +142,18 @@ namespace Akka.Remote.gRPC
         public override string SchemeIdentifier => "grpc";
         
         public Address LocalAddress { get; private set; }
+        
+        private async Task<IPEndPoint> ResolveNameAsync(DnsEndPoint address, AddressFamily addressFamily = AddressFamily.InterNetwork)
+        {
+            var resolved = await Dns.GetHostEntryAsync(address.Host).ConfigureAwait(false);
+            var found = resolved.AddressList.LastOrDefault(a => a.AddressFamily == addressFamily);
+            if (found == null)
+            {
+                throw new KeyNotFoundException($"Couldn't resolve IP endpoint from provided DNS name '{address}' with address family of '{addressFamily}'");
+            }
+
+            return new IPEndPoint(found, address.Port);
+        }
 
         public override async Task<(Address, TaskCompletionSource<IAssociationEventListener>)> Listen()
         {
@@ -149,8 +162,13 @@ namespace Akka.Remote.gRPC
             if (IPAddress.TryParse(Settings.Hostname, out ip))
                 listenAddress = new IPEndPoint(ip, Settings.Port);
             else
-                listenAddress = new DnsEndPoint(Settings.Hostname, Settings.Port);
-
+            {
+                var temp = new DnsEndPoint(Settings.Hostname, Settings.Port);
+                
+                // todo: need to add IPV6 handling
+                listenAddress = await ResolveNameAsync(temp).ConfigureAwait(false);
+            }
+            
             try
             {
                 var builder = WebApplication.CreateBuilder();
@@ -195,7 +213,7 @@ namespace Akka.Remote.gRPC
                 await _host.StartAsync();
 
                 LocalAddress = MapGrpcConnectionToAddress(_host.Urls, SchemeIdentifier, System.Name,
-                    Settings.PublicPort ?? Settings.Port);
+                    Settings.PublicPort);
 
                 return (LocalAddress, _associationListenerPromise);
             }
