@@ -59,46 +59,28 @@ namespace Akka.Remote.gRPC
     internal sealed class GrpcConnectionManager
     {
         public ConcurrentSet<GrpcHandler> ConnectionGroup { get; } = new ConcurrentSet<GrpcHandler>();
-
-        private readonly Task<IAssociationEventListener> _listenerTask;
         public GrpcTransport Transport { get; }
 
         public ActorSystem System => Transport.System;
         
 
-        public GrpcConnectionManager(Task<IAssociationEventListener> listenerTask, GrpcTransport transport)
+        public GrpcConnectionManager(GrpcTransport transport)
         {
-            _listenerTask = listenerTask;
             Transport = transport;
         }
 
-        public async ValueTask<(GrpcHandler grpc, AssociationHandle handle)> StartHandlerAsync(
+        public async ValueTask<GrpcHandler> StartHandlerAsync(
             IAsyncStreamReader<Akka.Remote.Transport.gRPC.Payload> requestStream,
             IAsyncStreamWriter<Akka.Remote.Transport.gRPC.Payload> responseStream,
             Address localAddress,
             Address remoteAddress,
             CancellationToken grpcCancellationToken)
         {
-            var associationEventListener = await _listenerTask.ConfigureAwait(false);
 
             var handler = new GrpcHandler(this, requestStream, responseStream, localAddress, remoteAddress,
                 grpcCancellationToken);
-    
-            var associationHandle = new GrpcAssociationHandle(localAddress, remoteAddress, handler);
-            associationEventListener.Notify(new InboundAssociation(associationHandle));
-
-            // prepare the event listener
-            async Task RegisterEventListener()
-            {
-                var listener = await associationHandle.ReadHandlerSource.Task.ConfigureAwait(false);
-                handler.RegisterListener(listener);
-            }
-
-            // don't want to await here
-#pragma warning disable CS4014
-            RegisterEventListener();
-#pragma warning restore CS4014
-            return (handler, associationHandle);
+            
+            return handler;
         }
 
         public async Task TerminateAsync()
@@ -128,12 +110,13 @@ namespace Akka.Remote.gRPC
         
         public GrpcTransport(ActorSystem system, Config config)
         {
+            MaximumPayloadBytes = 1024 * 256;
             System = system;
             Config = config;
             Settings = GrpcTransportSettings.Create(config);
             Log = Logging.GetLogger(System, GetType());
             _associationListenerPromise = new TaskCompletionSource<IAssociationEventListener>();
-            _connectionManager = new GrpcConnectionManager(_associationListenerPromise.Task, this);
+            _connectionManager = new GrpcConnectionManager(this);
         }
 
         private readonly TaskCompletionSource<IAssociationEventListener> _associationListenerPromise;
@@ -236,6 +219,49 @@ namespace Akka.Remote.gRPC
             }
         }
 
+        internal async Task<AssociationHandle> Init(GrpcHandler handler, Address localAddress, Address remoteAddress, bool inbound = true)
+        {
+            if (localAddress != null)
+            {
+                var handle = CreateHandle(handler, localAddress, remoteAddress);
+
+                if (inbound)
+                {
+                    var associationEventListener = await _associationListenerPromise.Task.ConfigureAwait(false);
+                    associationEventListener.Notify(new InboundAssociation(handle));
+                }
+
+                return handle;
+            }
+            else // bad local address. Terminate.
+            {
+#pragma warning disable CS4014
+                handler.CloseAsync();
+#pragma warning restore CS4014
+                return null;
+            }
+        }
+
+        internal AssociationHandle CreateHandle(GrpcHandler handler, Address localAddress,
+            Address remoteAddress)
+        {
+            var associationHandle = new GrpcAssociationHandle(localAddress, remoteAddress, handler);
+
+            // prepare the event listener
+            async Task RegisterEventListener()
+            {
+                var listener = await associationHandle.ReadHandlerSource.Task.ConfigureAwait(false);
+                handler.RegisterListener(listener);
+            }
+
+            // don't want to await here
+#pragma warning disable CS4014
+            RegisterEventListener();
+#pragma warning restore CS4014
+
+            return associationHandle;
+        }
+
         internal static Address MapGrpcConnectionToAddress(ICollection<string> hostUrls, 
             string schemeIdentifier, string systemName, int? port = null, string publicHostname = null)
         {
@@ -288,8 +314,10 @@ namespace Akka.Remote.gRPC
             var client = new AkkaRemote.AkkaRemoteClient(remoteChannel);
             var options = new CallOptions() { };
             var ep = client.MessageEndpoint(options);
-            var (grpc, associationHandle) = await _connectionManager.StartHandlerAsync(ep.ResponseStream, ep.RequestStream, LocalAddress, remoteAddress,
+            var grpc = await _connectionManager.StartHandlerAsync(ep.ResponseStream, ep.RequestStream, LocalAddress, remoteAddress,
                 options.CancellationToken).ConfigureAwait(false);
+
+            var associationHandle = await Init(grpc, grpc.LocalAddress, grpc.RemoteAddress, false).ConfigureAwait(false);
             
             // dispose client asynchronously
             async Task DisposeUponClose()

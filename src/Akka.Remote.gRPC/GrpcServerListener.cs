@@ -35,8 +35,11 @@ internal sealed class GrpcServerListener : AkkaRemote.AkkaRemoteBase
         var remoteAddress =GrpcTransport.MapGrpcConnectionToAddress(context.Peer, Transport.SchemeIdentifier, System.Name, 0);
         var localAddress = _connectionManager.Transport.LocalAddress;
 
-        var (grpc, handle) = await _connectionManager.StartHandlerAsync(requestStream, responseStream, localAddress,
+        var grpc = await _connectionManager.StartHandlerAsync(requestStream, responseStream, localAddress,
             remoteAddress, context.CancellationToken);
+
+        // force the handler to be reported as an inbound association to Akka.Remote
+        var handle = await _connectionManager.Transport.Init(grpc, grpc.LocalAddress, grpc.RemoteAddress).ConfigureAwait(false);
 
         // read / write until signaled for termination.
         await grpc.WhenTerminated.ConfigureAwait(false);
