@@ -45,6 +45,9 @@ namespace RemotePingPong
         public static Config CreateActorSystemConfig(string actorSystemName, string ipOrHostname, int port)
         {
             var baseConfig = ConfigurationFactory.ParseString(@"
+            #akka.actor.internal-dispatcher = akka.actor.default-dispatcher
+            #akka.remote.default-remote-dispatcher = akka.actor.default-dispatcher
+            #akka.remote.backoff-remote-dispatcher = akka.actor.default-dispatcher
             akka {
               actor.provider = remote
               loglevel = ERROR
@@ -54,8 +57,8 @@ namespace RemotePingPong
               remote {
                 log-remote-lifecycle-events = off
 
-               akka.remote.grpc.hostname = localhost
-                akka.remote.grpc.port=0                
+                grpc.hostname = localhost
+                grpc.port=0                
               }
             }").WithFallback(GrpcTransportSettings.DefaultConfig);;
 
@@ -104,7 +107,7 @@ namespace RemotePingPong
             _firstRun = false;
         }
 
-        const long repeat = 100000L;
+        const long repeat = 10000L;
 
         private static async Task Start(uint timesToRun)
         {         

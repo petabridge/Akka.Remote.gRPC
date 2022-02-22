@@ -19,6 +19,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Akka.Remote.gRPC
 {
@@ -172,6 +173,10 @@ namespace Akka.Remote.gRPC
                         // todo - configure max frame size et al here
                         // see https://docs.microsoft.com/en-us/aspnet/core/fundamentals/servers/kestrel/options?view=aspnetcore-6.0
                         // options.Limits
+                    })
+                    .ConfigureLogging(log =>
+                    {
+                        log.ClearProviders();
                     })
                     .ConfigureServices(services =>
                     {
