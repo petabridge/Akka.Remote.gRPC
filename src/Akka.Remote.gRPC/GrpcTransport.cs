@@ -143,7 +143,7 @@ namespace Akka.Remote.gRPC
         
         public Address LocalAddress { get; private set; }
         
-        private async Task<IPEndPoint> ResolveNameAsync(DnsEndPoint address, AddressFamily addressFamily = AddressFamily.InterNetwork)
+        private static async Task<IPEndPoint> ResolveNameAsync(DnsEndPoint address, AddressFamily addressFamily = AddressFamily.InterNetwork)
         {
             var resolved = await Dns.GetHostEntryAsync(address.Host).ConfigureAwait(false);
             var found = resolved.AddressList.LastOrDefault(a => a.AddressFamily == addressFamily);
@@ -179,7 +179,7 @@ namespace Akka.Remote.gRPC
                         {
                             // todo: want HTTP1 to support platforms like Azure App Service,
                             // but  need to lean on HTTP2 as the default for performance reasons.
-                            listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
+                            listenOptions.Protocols = HttpProtocols.Http2;
                         });
 
                         // todo - configure max frame size et al here
@@ -192,7 +192,7 @@ namespace Akka.Remote.gRPC
                         services.AddSingleton<GrpcConnectionManager>(_connectionManager);
                         services.AddGrpc(options =>
                         {
-                            options.IgnoreUnknownServices = true;
+                            //options.IgnoreUnknownServices = true;
 
                             // TODO: this might be a better place to set frame size limits
                             options.MaxReceiveMessageSize = null;
@@ -213,7 +213,7 @@ namespace Akka.Remote.gRPC
                 await _host.StartAsync();
 
                 LocalAddress = MapGrpcConnectionToAddress(_host.Urls, SchemeIdentifier, System.Name,
-                    Settings.PublicPort);
+                    Settings.PublicPort, Settings.PublicHostname ?? Settings.Hostname);
 
                 return (LocalAddress, _associationListenerPromise);
             }
@@ -243,18 +243,31 @@ namespace Akka.Remote.gRPC
             string schemeIdentifier, string systemName, int? port = null, string publicHostname = null)
         {
             // TODO: probably need to do some parsing / filtering on hostUrls bindings here
-            if (string.IsNullOrEmpty(publicHostname) && Uri.TryCreate(hostUrl, UriKind.Absolute, out var fakeAddr))
+            if (Uri.TryCreate(hostUrl, UriKind.Absolute, out var fakeAddr))
             {
-                return new Address(schemeIdentifier, systemName, fakeAddr.Host, port ?? fakeAddr.Port);
+                return new Address(schemeIdentifier, systemName, publicHostname ?? fakeAddr.Host, port ?? fakeAddr.Port);
             }
             return new Address(schemeIdentifier, systemName, publicHostname ?? hostUrl, port);
         }
 
-        internal static string MapAddressToGrpcEndpoint(Address address)
+        internal static async Task<string> MapAddressToGrpcEndpoint(Address address)
         {
             // todo: HTTPS support
             if (address.Port == null) throw new ArgumentException($"address port must not be null: {address}");
-            return $"http://{address.Host}:{address.Port}";
+            if (address.Host == null) throw new ArgumentException($"address host must not be null: {address}");
+
+            IPEndPoint listenAddress;
+            if (IPAddress.TryParse(address.Host, out var ip))
+                listenAddress = new IPEndPoint(ip, address.Port.Value);
+            else
+            {
+                var temp = new DnsEndPoint(address.Host, address.Port.Value);
+                
+                // todo: need to add IPV6 handling
+                listenAddress = await ResolveNameAsync(temp).ConfigureAwait(false);
+            }
+            
+            return $"http://{listenAddress.Address}:{listenAddress.Port}";
         }
 
         public override bool IsResponsibleFor(Address remote)
@@ -267,7 +280,7 @@ namespace Akka.Remote.gRPC
             /*
              * Establish outbound gRPC connection
              */
-            var remoteChannel = GrpcChannel.ForAddress(MapAddressToGrpcEndpoint(remoteAddress));
+            var remoteChannel = GrpcChannel.ForAddress(await MapAddressToGrpcEndpoint(remoteAddress).ConfigureAwait(false));
             var client = new AkkaRemote.AkkaRemoteClient(remoteChannel);
             var options = new CallOptions() { };
             var ep = client.MessageEndpoint(options);
@@ -277,7 +290,7 @@ namespace Akka.Remote.gRPC
             // dispose client asynchronously
             async Task DisposeUponClose()
             {
-                // this task will only terminate once the channel has been termianted
+                // this task will only terminate once the channel has been terminated
                 await grpc.WhenTerminated.ConfigureAwait(false);
                 try
                 {

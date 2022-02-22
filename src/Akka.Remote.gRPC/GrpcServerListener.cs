@@ -29,7 +29,6 @@ internal sealed class GrpcServerListener : AkkaRemote.AkkaRemoteBase
     public override async Task MessageEndpoint(IAsyncStreamReader<Payload> requestStream,
         IServerStreamWriter<Payload> responseStream, ServerCallContext context)
     {
-        // TODO: we're going to need to parse the port from host.
         var remoteAddress =GrpcTransport.MapGrpcConnectionToAddress(context.Peer, Transport.SchemeIdentifier, System.Name, 0);
         var localAddress = _connectionManager.Transport.LocalAddress;
 

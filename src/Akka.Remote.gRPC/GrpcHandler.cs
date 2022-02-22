@@ -68,7 +68,22 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         if (!_internalCancellationToken.IsCancellationRequested)
         {
             // don't await
-            _responseStream.WriteAsync(new Payload() { Message = message }).ConfigureAwait(false);
+            async Task DoWrite()
+            {
+                try
+                {
+                    await _responseStream.WriteAsync(new Payload() { Message = message }).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    var e = ex;
+                }
+            }
+
+#pragma warning disable CS4014
+            DoWrite();
+#pragma warning restore CS4014
+           
             return true;
         }
 
