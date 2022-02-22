@@ -181,16 +181,15 @@ namespace Akka.Remote.gRPC
                             options.MaxSendMessageSize = null;
                         });
 
-                    })
-                    .Configure(app =>
-                    {
-                        app.UseEndpoints(ep =>
-                        {
-                            ep.MapGrpcService<GrpcServerListener>();
-                        });
                     });
 
                 _host = builder.Build();
+                
+                _host.UseRouting()
+                    .UseEndpoints(ep =>
+                {
+                    ep.MapGrpcService<GrpcServerListener>();
+                });
                 
                 // begin accepting incoming requests
                 await _host.StartAsync();
@@ -216,16 +215,20 @@ namespace Akka.Remote.gRPC
         }
 
         internal static Address MapGrpcConnectionToAddress(ICollection<string> hostUrls, 
-            string schemeIdentifier, string systemName, int port, string publicHostname = null)
+            string schemeIdentifier, string systemName, int? port = null, string publicHostname = null)
         {
             // TODO: probably need to do some parsing / filtering on hostUrls bindings here
             return MapGrpcConnectionToAddress(hostUrls.First(), schemeIdentifier, systemName, port, publicHostname);
         }
         
         internal static Address MapGrpcConnectionToAddress(string hostUrl, 
-            string schemeIdentifier, string systemName, int port, string publicHostname = null)
+            string schemeIdentifier, string systemName, int? port = null, string publicHostname = null)
         {
             // TODO: probably need to do some parsing / filtering on hostUrls bindings here
+            if (string.IsNullOrEmpty(publicHostname) && Uri.TryCreate(hostUrl, UriKind.Absolute, out var fakeAddr))
+            {
+                return new Address(schemeIdentifier, systemName, fakeAddr.Host, port ?? fakeAddr.Port);
+            }
             return new Address(schemeIdentifier, systemName, publicHostname ?? hostUrl, port);
         }
 
