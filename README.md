@@ -1,6 +1,6 @@
 ﻿# Akka.Remote.gRPC
 
-Update this readme file with your details.
+Prototype gRPC transport for [Akka.NET](https://getakka.net/) built on top of ASP.NET gRPC / .NET 6.0.
 
 # The Build System
 
