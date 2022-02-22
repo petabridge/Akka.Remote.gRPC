@@ -38,6 +38,8 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         _pendingWrites = Channel.CreateUnbounded<Payload>();
         _requestStream = requestStream;
         _responseStream = responseStream;
+        
+        // TODO: send disassociation signals depending upon which cancellation token is invoked
         _grpcCancellationToken = grpcCancellationToken;
         RemoteAddress = remoteAddress;
         LocalAddress = localAddress;

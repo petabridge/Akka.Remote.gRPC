@@ -8,7 +8,11 @@ public static class GrpcHelpers
 {
     public static ActorSystemSetup CreateConfig(string host, int port)
     {
-        var config = ConfigurationFactory.ParseString($@"akka.remote.grpc.hostname = ""{host}""
+        var config = ConfigurationFactory.ParseString($@"
+                akka.loglevel = DEBUG
+                akka.remote.log-received-messages = on
+                akka.remote.log-sent-messages = on
+                akka.remote.grpc.hostname = ""{host}""
                 akka.remote.grpc.port={port}").WithFallback(GrpcTransportSettings.DefaultConfig);
             
         var setup = ActorSystemSetup.Create().WithSetup(BootstrapSetup.Create()

@@ -2,6 +2,7 @@
 using Akka.Actor;
 using Akka.Remote.Transport.gRPC;
 using Grpc.Core;
+using Grpc.Net.Client;
 
 namespace Akka.Remote.gRPC;
 
@@ -29,6 +30,8 @@ internal sealed class GrpcServerListener : AkkaRemote.AkkaRemoteBase
     public override async Task MessageEndpoint(IAsyncStreamReader<Payload> requestStream,
         IServerStreamWriter<Payload> responseStream, ServerCallContext context)
     {
+        // have to parse this here https://github.com/grpc/grpc/blob/master/doc/naming.md
+        // currently showing up as IPV4 addresses
         var remoteAddress =GrpcTransport.MapGrpcConnectionToAddress(context.Peer, Transport.SchemeIdentifier, System.Name, 0);
         var localAddress = _connectionManager.Transport.LocalAddress;
 
