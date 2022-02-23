@@ -16,7 +16,7 @@ namespace Akka.Remote.gRPC;
 internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
 {
     private readonly GrpcConnectionManager _connectionManager;
-    private readonly Channel<Payload> _pendingWrites;
+    private readonly Channel<ByteString> _pendingWrites;
     private readonly IAsyncStreamReader<Payload> _requestStream;
     private readonly IAsyncStreamWriter<Payload> _responseStream;
 
@@ -35,7 +35,7 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
     {
         _connectionManager = connectionManager;
         _connectionManager.ConnectionGroup.TryAdd(this);
-        _pendingWrites = Channel.CreateUnbounded<Payload>();
+        _pendingWrites = Channel.CreateUnbounded<ByteString>();
         _requestStream = requestStream;
         _responseStream = responseStream;
         
@@ -83,7 +83,7 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
                 if (await _pendingWrites.Writer.WaitToWriteAsync(_internalCancellationToken.Token)
                         .ConfigureAwait(false))
                 {
-                    await _pendingWrites.Writer.WriteAsync(new Payload() { Message = message },
+                    await _pendingWrites.Writer.WriteAsync(message,
                         _internalCancellationToken.Token).ConfigureAwait(false);
                     return true;
                 }
@@ -91,9 +91,9 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         }
         catch (Exception ex)
         {
+            // TODO: proper error logging and escalation
             var e = ex;
         }
-        
 
         return false;
     }
@@ -112,16 +112,33 @@ internal sealed class GrpcHandler : IDisposable, IEquatable<GrpcHandler>
         await WhenReadOpen.ConfigureAwait(false);
         await foreach (var read in _requestStream.ReadAllAsync(_internalCancellationToken.Token).ConfigureAwait(false))
         {
-            _listener.Notify(new InboundPayload(read.Message));
+            foreach (var msg in read.Message)
+            {
+                _listener.Notify(new InboundPayload(msg));
+            }
         }
     }
+    
+    public const int DefaultMaxPendingWrites = 30;
+    public const long DefaultMaxPendingBytes = 16 * 1024L;
 
     private async Task DoWrite()
     {
-        await foreach (var write in _pendingWrites.Reader.ReadAllAsync(_internalCancellationToken.Token)
-                           .ConfigureAwait(false))
+        /*
+         * wait for data to become available in channel
+         */
+        while (await _pendingWrites.Reader.WaitToReadAsync(_internalCancellationToken.Token).ConfigureAwait(false))
         {
-            await _responseStream.WriteAsync(write).ConfigureAwait(false);
+            var pendingWriteCount = 0;
+            var batch = new Payload();
+            
+            while (_pendingWrites.Reader.TryRead(out var msg) && pendingWriteCount < DefaultMaxPendingWrites)
+            {
+                batch.Message.Add(msg);
+                pendingWriteCount++;
+            }
+
+            await _responseStream.WriteAsync(batch).ConfigureAwait(false);
         }
     }
 
